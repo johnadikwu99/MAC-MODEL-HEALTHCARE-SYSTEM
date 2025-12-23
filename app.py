@@ -4,13 +4,16 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
 import pandas as pd
+import os
 
 # ---------------- DATABASE SETUP ----------------
 Base = declarative_base()
-engine = create_engine("sqlite:///database.db", connect_args={"check_same_thread": False})
+DB_PATH = os.path.join(os.getcwd(), "database.db")
+engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 Session = sessionmaker(bind=engine)
 db_session = Session()
 
+# ---------------- MODELS ----------------
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
@@ -18,7 +21,7 @@ class User(Base):
     password_hash = Column(String)
     role = Column(String)
     clearance = Column(Integer)
-    active = Column(Integer, default=1)  # 1 = active, 0 = disabled
+    active = Column(Integer, default=1)
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -41,27 +44,32 @@ class AuditLog(Base):
     action = Column(String)
     timestamp = Column(DateTime, default=datetime.now)
 
-Base.metadata.create_all(engine)
+# ---------------- INIT DATABASE ----------------
+try:
+    Base.metadata.create_all(engine)
+except Exception as e:
+    st.error(f"DB creation failed: {e}")
 
-# ---------------- INITIAL DATA ----------------
 def init_data():
-    if not db_session.query(User).filter_by(username="admin").first():
-        admin = User(username="admin", role="admin", clearance=3)
-        admin.set_password("admin123")
-        doctor = User(username="doctor1", role="doctor", clearance=3)
-        doctor.set_password("doc123")
-        nurse = User(username="nurse1", role="nurse", clearance=2)
-        nurse.set_password("nurse123")
-        staff = User(username="staff1", role="staff", clearance=1)
-        staff.set_password("staff123")
-        db_session.add_all([admin, doctor, nurse, staff])
+    try:
+        if not db_session.query(User).filter_by(username="admin").first():
+            admin = User(username="admin", role="admin", clearance=3)
+            admin.set_password("admin123")
+            doctor = User(username="doctor1", role="doctor", clearance=3)
+            doctor.set_password("doc123")
+            nurse = User(username="nurse1", role="nurse", clearance=2)
+            nurse.set_password("nurse123")
+            staff = User(username="staff1", role="staff", clearance=1)
+            staff.set_password("staff123")
+            db_session.add_all([admin, doctor, nurse, staff])
 
-        # Example patients
-        p1 = Patient(name="John Doe", diagnosis="Cardiac Arrest", classification=3)
-        p2 = Patient(name="Jane Smith", diagnosis="Diabetes", classification=2)
-        p3 = Patient(name="Alex Brown", diagnosis="Flu", classification=1)
-        db_session.add_all([p1, p2, p3])
-        db_session.commit()
+            p1 = Patient(name="John Doe", diagnosis="Cardiac Arrest", classification=3)
+            p2 = Patient(name="Jane Smith", diagnosis="Diabetes", classification=2)
+            p3 = Patient(name="Alex Brown", diagnosis="Flu", classification=1)
+            db_session.add_all([p1, p2, p3])
+            db_session.commit()
+    except Exception as e:
+        st.error(f"Init data failed: {e}")
 
 init_data()
 
@@ -71,6 +79,7 @@ st.markdown("""
 body {background-color:#0b0c10; color:white; font-family:'Arial', sans-serif;}
 .stButton>button {background-color:#1f6feb; color:white; border-radius:8px; height:40px; margin:5px; width:100%;}
 .stButton>button:hover {background-color:#3aa0ff; transition:0.3s;}
+input, .stTextInput>div>input {background-color:#1f1f1f; color:white; border-radius:5px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -85,24 +94,18 @@ def login_page():
     st.set_page_config(page_title="MAC Healthcare System", page_icon="🔒", layout="centered")
     st.markdown("<h1 style='text-align: center; color: #1f6feb;'>🔒 MAC Healthcare System</h1>", unsafe_allow_html=True)
     st.markdown("<h4 style='text-align: center; color: white;'>Secure Access Controlled Dashboard</h4>", unsafe_allow_html=True)
-    st.write("")  # spacing
     
-    col1, col2, col3 = st.columns([1, 2, 1])
+    col1, col2, col3 = st.columns([1,2,1])
     with col2:
-        st.markdown("<h5 style='color:white; text-align:center;'>Login</h5>", unsafe_allow_html=True)
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
-        st.write("")  # spacing
         if st.button("Login"):
-            user = db_session.query(User).filter_by(username=username).first()
+            user = db_session.query(User).filter_by(username=username, active=1).first()
             if user and user.check_password(password):
-                if user.active == 0:
-                    st.error("User is disabled. Contact admin.")
-                else:
-                    st.session_state.logged_in = True
-                    st.session_state.user = user
+                st.session_state.logged_in = True
+                st.session_state.user = user
             else:
-                st.error("Invalid credentials")
+                st.error("Invalid credentials or account disabled.")
 
 # ---------------- DASHBOARD ----------------
 def dashboard_page(user):
@@ -145,38 +148,28 @@ def admin_panel(user):
     st.sidebar.write(f"Admin: {user.username}")
     st.sidebar.button("Logout", on_click=lambda: st.session_state.update({"logged_in":False,"user":None}))
 
-    # Users Table
+    # Users Table with Disable/Delete
     st.subheader("Users")
     users = db_session.query(User).all()
-    users_data = []
     for u in users:
-        status = "Active" if getattr(u, "active", 1) else "Disabled"
-        users_data.append({"Username": u.username, "Role": u.role, "Clearance": u.clearance, "Status": status})
-    users_df = pd.DataFrame(users_data)
-    st.dataframe(users_df.style.set_properties(**{'background-color': '#1e1e2e', 'color': 'white'})\
-                             .apply(lambda x: ['background-color: #2a2a3c' if i%2==0 else '' for i in range(len(x))], axis=1))
-
-    # Disable / Enable / Delete buttons
-    for u in users:
-        col1, col2, col3 = st.columns([1,1,1])
+        status = "Active" if u.active else "Disabled"
+        col1, col2, col3, col4 = st.columns([2,1,1,1])
         with col1:
-            if st.button(f"Disable {u.username}", key=f"disable_{u.id}"):
-                u.active = 0
-                db_session.commit()
-                st.success(f"{u.username} disabled.")
+            st.write(u.username)
         with col2:
-            if st.button(f"Enable {u.username}", key=f"enable_{u.id}"):
-                u.active = 1
-                db_session.commit()
-                st.success(f"{u.username} enabled.")
+            st.write(u.role)
         with col3:
-            if st.button(f"Delete {u.username}", key=f"delete_{u.id}"):
-                if u.username != "admin":
+            if u.username != "admin":  # prevent admin self-disable
+                if st.button("Disable" if u.active else "Enable", key=f"disable_{u.id}"):
+                    u.active = 0 if u.active else 1
+                    db_session.commit()
+                    st.experimental_rerun()
+        with col4:
+            if u.username != "admin":
+                if st.button("Delete", key=f"delete_{u.id}"):
                     db_session.delete(u)
                     db_session.commit()
-                    st.success(f"{u.username} deleted.")
-                else:
-                    st.error("Cannot delete main admin.")
+                    st.experimental_rerun()
 
     # Add User Form
     with st.form("add_user_form"):
@@ -235,4 +228,3 @@ else:
         admin_panel(user)
     else:
         dashboard_page(user)
-
