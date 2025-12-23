@@ -1,11 +1,9 @@
 import streamlit as st
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, inspect
+from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
 import pandas as pd
-import sqlite3
-import os
 
 # ---------------- DATABASE SETUP ----------------
 Base = declarative_base()
@@ -13,7 +11,6 @@ engine = create_engine("sqlite:///database.db", connect_args={"check_same_thread
 Session = sessionmaker(bind=engine)
 db_session = Session()
 
-# ---------------- TABLE DEFINITIONS ----------------
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
@@ -21,7 +18,7 @@ class User(Base):
     password_hash = Column(String)
     role = Column(String)
     clearance = Column(Integer)
-    active = Column(Integer, default=1)  # 1 = active, 0 = disabled
+    active = Column(Integer, default=1)  # 1=active, 0=disabled
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -44,30 +41,18 @@ class AuditLog(Base):
     action = Column(String)
     timestamp = Column(DateTime, default=datetime.now)
 
-# ---------------- CHECK AND ALTER TABLE ----------------
-# This will add the `active` column if it does not exist
-conn = sqlite3.connect("database.db")
-cursor = conn.cursor()
-cursor.execute("PRAGMA table_info(users)")
-columns = [col[1] for col in cursor.fetchall()]
-if "active" not in columns:
-    cursor.execute("ALTER TABLE users ADD COLUMN active INTEGER DEFAULT 1")
-    conn.commit()
-conn.close()
-
-# Create tables if not exist
 Base.metadata.create_all(engine)
 
 # ---------------- INITIAL DATA ----------------
 def init_data():
     if not db_session.query(User).filter_by(username="admin").first():
-        admin = User(username="admin", role="admin", clearance=3, active=1)
+        admin = User(username="admin", role="admin", clearance=3)
         admin.set_password("admin123")
-        doctor = User(username="doctor1", role="doctor", clearance=3, active=1)
+        doctor = User(username="doctor1", role="doctor", clearance=3)
         doctor.set_password("doc123")
-        nurse = User(username="nurse1", role="nurse", clearance=2, active=1)
+        nurse = User(username="nurse1", role="nurse", clearance=2)
         nurse.set_password("nurse123")
-        staff = User(username="staff1", role="staff", clearance=1, active=1)
+        staff = User(username="staff1", role="staff", clearance=1)
         staff.set_password("staff123")
         db_session.add_all([admin, doctor, nurse, staff])
 
@@ -110,15 +95,12 @@ def login_page():
         password = st.text_input("Password", type="password")
         st.write("")  # spacing
         if st.button("Login"):
-            user = db_session.query(User).filter_by(username=username).first()
+            user = db_session.query(User).filter_by(username=username, active=1).first()
             if user and user.check_password(password):
-                if user.active == 0:
-                    st.error("Your account has been disabled. Contact admin.")
-                else:
-                    st.session_state.logged_in = True
-                    st.session_state.user = user
+                st.session_state.logged_in = True
+                st.session_state.user = user
             else:
-                st.error("Invalid credentials")
+                st.error("Invalid credentials or user disabled")
 
 # ---------------- DASHBOARD ----------------
 def dashboard_page(user):
@@ -129,7 +111,7 @@ def dashboard_page(user):
     st.subheader("Accessible Patients")
 
     search = st.text_input("Search patient by name")
-    patients = db_session.query(Patient).filter(Patient.classification <= user.clearance)
+    patients = db_session.query(Patient).filter(Patient.classification <= user.clearance).all()
     if search:
         patients = [p for p in patients if search.lower() in p.name.lower()]
 
@@ -161,79 +143,42 @@ def admin_panel(user):
     st.sidebar.write(f"Admin: {user.username}")
     st.sidebar.button("Logout", on_click=lambda: st.session_state.update({"logged_in":False,"user":None}))
 
-    # Users Table
     st.subheader("Users")
     users = db_session.query(User).all()
-    users_df = pd.DataFrame([{"Username": u.username, "Role": u.role, "Clearance": u.clearance, "Active": "Yes" if u.active==1 else "No"} for u in users])
-    st.dataframe(users_df.style.set_properties(**{'background-color': '#1e1e2e', 'color': 'white'})\
-                             .apply(lambda x: ['background-color: #2a2a3c' if i%2==0 else '' for i in range(len(x))], axis=1))
+    if "rerun_flag" not in st.session_state:
+        st.session_state.rerun_flag = False
 
-    # Add User Form
-    with st.form("add_user_form"):
-        st.write("Add New User")
-        new_username = st.text_input("Username")
-        new_password = st.text_input("Password", type="password")
-        new_role = st.selectbox("Role", ["admin","doctor","nurse","staff"])
-        new_clearance = st.slider("Clearance Level", 1, 3, 1)
-        submitted = st.form_submit_button("Add User")
-        if submitted:
-            if db_session.query(User).filter_by(username=new_username).first():
-                st.error("Username already exists.")
-            else:
-                new_user = User(username=new_username, role=new_role, clearance=new_clearance, active=1)
-                new_user.set_password(new_password)
-                db_session.add(new_user)
-                db_session.commit()
-                st.success(f"User {new_username} added successfully.")
-
-    # Disable / Delete Buttons
-    st.subheader("Manage Users")
     for u in users:
-        col1, col2, col3 = st.columns([3,1,1])
+        col1, col2, col3 = st.columns([4,2,2])
         with col1:
-            st.markdown(f"{u.username} ({u.role}) - Clearance: {u.clearance} - Active: {'Yes' if u.active else 'No'}")
+            status = "Active" if u.active else "Disabled"
+            st.markdown(f"{u.username} ({u.role}) - Clearance: {u.clearance} - Status: {status}")
         with col2:
-            if st.button(f"Disable {u.username}", key=f"disable_{u.id}"):
-                u.active = 0
+            # Toggle Disable/Enable
+            if st.button(f"{'Disable' if u.active else 'Enable'} {u.username}", key=f"toggle_{u.id}"):
+                u.active = 0 if u.active else 1
                 db_session.commit()
-                st.success(f"{u.username} disabled.")
-                st.experimental_rerun()
+                st.success(f"{u.username} has been {'disabled' if u.active == 0 else 'enabled'}.")
+                st.session_state.rerun_flag = True
         with col3:
+            # Delete user
             if st.button(f"Delete {u.username}", key=f"delete_{u.id}"):
                 db_session.delete(u)
                 db_session.commit()
-                st.success(f"{u.username} deleted.")
-                st.experimental_rerun()
+                st.success(f"{u.username} deleted permanently.")
+                st.session_state.rerun_flag = True
 
-    # Patients Table
+    # Trigger rerun **after all actions**
+    if st.session_state.rerun_flag:
+        st.session_state.rerun_flag = False
+        st.experimental_rerun()
+
+    # Patients Table and Add Patient Form
     st.subheader("Patients")
     patients = db_session.query(Patient).all()
     patients_df = pd.DataFrame([{"Name": p.name, "Diagnosis": p.diagnosis, "Classification": p.classification} for p in patients])
     st.dataframe(patients_df.style.set_properties(**{'background-color': '#1e1e2e', 'color': 'white'})\
                              .apply(lambda x: ['background-color: #2a2a3c' if i%2==0 else '' for i in range(len(x))], axis=1))
-
-    # Add Patient Form
-    with st.form("add_patient_form"):
-        st.write("Add New Patient")
-        patient_name = st.text_input("Patient Name")
-        diagnosis = st.text_input("Diagnosis")
-        classification = st.slider("Classification Level", 1, 3, 1)
-        submitted = st.form_submit_button("Add Patient")
-        if submitted:
-            if db_session.query(Patient).filter_by(name=patient_name).first():
-                st.error("Patient already exists.")
-            else:
-                new_patient = Patient(name=patient_name, diagnosis=diagnosis, classification=classification)
-                db_session.add(new_patient)
-                db_session.commit()
-                st.success(f"Patient {patient_name} added successfully.")
-
-    # Audit Logs
-    st.subheader("Audit Logs")
-    logs = db_session.query(AuditLog).order_by(AuditLog.timestamp.desc()).all()
-    logs_df = pd.DataFrame([{"Time": l.timestamp, "User": l.username, "Patient": l.patient_name, "Action": l.action} for l in logs])
-    st.dataframe(logs_df.style.set_properties(**{'background-color': '#1e1e2e', 'color': 'white'})\
-                           .apply(lambda x: ['background-color: #2a2a3c' if i%2==0 else '' for i in range(len(x))], axis=1))
 
 # ---------------- MAIN ----------------
 if not st.session_state.logged_in:
@@ -244,4 +189,5 @@ else:
         admin_panel(user)
     else:
         dashboard_page(user)
+
 
