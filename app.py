@@ -1,231 +1,241 @@
 import streamlit as st
-import sqlite3
+from sqlalchemy import create_engine, Column, Integer, String, DateTime
+from sqlalchemy.orm import sessionmaker, declarative_base
+from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
+import pandas as pd
 
-# ================= CONFIG =================
-st.set_page_config(
-    page_title="MAC Healthcare System",
-    page_icon="🔐",
-    layout="centered"
-)
+# ---------------- ROLE → CLEARANCE MAP ----------------
+ROLE_CLEARANCE = {
+    "admin": 3,
+    "doctor": 3,
+    "nurse": 2,
+    "staff": 1
+}
 
-DB_NAME = "database.db"
+# ---------------- DATABASE SETUP ----------------
+Base = declarative_base()
+engine = create_engine("sqlite:///database.db", connect_args={"check_same_thread": False})
+Session = sessionmaker(bind=engine)
+db_session = Session()
 
-# ================= DATABASE =================
-def connect_db():
-    return sqlite3.connect(DB_NAME, check_same_thread=False)
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    username = Column(String, unique=True)
+    password_hash = Column(String)
+    role = Column(String)
+    clearance = Column(Integer)
+    is_active = Column(Integer, default=1)  # 1 = active, 0 = disabled
 
-def init_db():
-    conn = connect_db()
-    cur = conn.cursor()
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        password TEXT,
-        clearance TEXT,
-        active INTEGER DEFAULT 1
-    )
-    """)
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS audit_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT,
-        action TEXT,
-        timestamp TEXT
-    )
-    """)
+class Patient(Base):
+    __tablename__ = "patients"
+    id = Column(Integer, primary_key=True)
+    name = Column(String)
+    diagnosis = Column(String)
+    classification = Column(Integer)
 
-    cur.execute("SELECT COUNT(*) FROM users")
-    if cur.fetchone()[0] == 0:
-        cur.executemany("""
-        INSERT INTO users (username, password, clearance, active)
-        VALUES (?, ?, ?, ?)
-        """, [
-            ("admin", "admin123", "Top Secret", 1),
-            ("doctor1", "doctor123", "Secret", 1),
-            ("nurse1", "nurse123", "Confidential", 1),
-            ("lab1", "lab123", "Restricted", 1)
-        ])
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    id = Column(Integer, primary_key=True)
+    username = Column(String)
+    patient_name = Column(String)
+    action = Column(String)
+    timestamp = Column(DateTime, default=datetime.now)
 
-    conn.commit()
-    conn.close()
+Base.metadata.create_all(engine)
 
-# ================= LOGGING =================
-def log_action(user, action):
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO audit_logs (username, action, timestamp) VALUES (?, ?, ?)",
-        (user, action, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    )
-    conn.commit()
-    conn.close()
+# ---------------- INITIAL DATA ----------------
+def init_data():
+    if not db_session.query(User).filter_by(username="admin").first():
+        admin = User(username="admin", role="admin", clearance=ROLE_CLEARANCE["admin"])
+        admin.set_password("admin123")
+        doctor = User(username="doctor1", role="doctor", clearance=ROLE_CLEARANCE["doctor"])
+        doctor.set_password("doc123")
+        nurse = User(username="nurse1", role="nurse", clearance=ROLE_CLEARANCE["nurse"])
+        nurse.set_password("nurse123")
+        staff = User(username="staff1", role="staff", clearance=ROLE_CLEARANCE["staff"])
+        staff.set_password("staff123")
+        db_session.add_all([admin, doctor, nurse, staff])
 
-def get_logs():
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute("SELECT username, action, timestamp FROM audit_logs ORDER BY id DESC")
-    logs = cur.fetchall()
-    conn.close()
-    return logs
+        # Example patients
+        p1 = Patient(name="John Doe", diagnosis="Cardiac Arrest", classification=3)
+        p2 = Patient(name="Jane Smith", diagnosis="Diabetes", classification=2)
+        p3 = Patient(name="Alex Brown", diagnosis="Flu", classification=1)
+        db_session.add_all([p1, p2, p3])
+        db_session.commit()
 
-# ================= USERS =================
-def authenticate(username, password):
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, username, clearance, active
-        FROM users WHERE username=? AND password=?
-    """, (username, password))
-    user = cur.fetchone()
-    conn.close()
-    return user
+init_data()
 
-def get_users():
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id, username, clearance, active FROM users")
-    users = cur.fetchall()
-    conn.close()
-    return users
+# ---------------- STREAMLIT CSS (embedded) ----------------
+st.markdown("""
+<style>
+body {background-color:#0b0c10; color:white; font-family:'Arial', sans-serif;}
+.stButton>button {background-color:#1f6feb; color:white; border-radius:8px; height:40px; margin:5px; width:100%;}
+.stButton>button:hover {background-color:#3aa0ff; transition:0.3s;}
+</style>
+""", unsafe_allow_html=True)
 
-def disable_user(uid):
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET active=0 WHERE id=?", (uid,))
-    conn.commit()
-    conn.close()
-
-def enable_user(uid):
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET active=1 WHERE id=?", (uid,))
-    conn.commit()
-    conn.close()
-
-def delete_user(uid):
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM users WHERE id=?", (uid,))
-    conn.commit()
-    conn.close()
-
-# ================= INIT =================
-init_db()
-
+# ---------------- SESSION STATE ----------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
 if "user" not in st.session_state:
     st.session_state.user = None
 
-if "confirm_delete" not in st.session_state:
-    st.session_state.confirm_delete = None
-
-# ================= LOGIN =================
-if not st.session_state.user:
-    st.markdown("## 🔐 MAC Healthcare Access System")
-    st.caption("Mandatory Access Control — Academic Demonstration")
-
-    u = st.text_input("Username")
-    p = st.text_input("Password", type="password")
-
-    if st.button("Login"):
-        user = authenticate(u, p)
-        if not user:
-            st.error("Invalid credentials")
-        else:
-            uid, uname, clearance, active = user
-            if not active:
-                st.error("Account disabled")
-                log_action(uname, "Login attempt while disabled")
+# ---------------- LOGIN PAGE ----------------
+def login_page():
+    st.set_page_config(page_title="MAC Healthcare System", page_icon="🔒", layout="centered")
+    
+    st.markdown("<h1 style='text-align: center; color: #1f6feb;'>🔒 MAC Healthcare System</h1>", unsafe_allow_html=True)
+    st.markdown("<h4 style='text-align: center; color: white;'>Secure Access Controlled Dashboard</h4>", unsafe_allow_html=True)
+    st.write("")  # spacing
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("<h5 style='color:white; text-align:center;'>Login</h5>", unsafe_allow_html=True)
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        st.write("")  # spacing
+        if st.button("Login"):
+            user = db_session.query(User).filter_by(username=username).first()
+            if user and user.check_password(password) and user.is_active == 1:
+                st.session_state.logged_in = True
+                st.session_state.user = user
+                st.success("Login successful!")
+            elif user and user.is_active == 0:
+                st.error("Account disabled. Contact admin.")
             else:
-                st.session_state.user = {
-                    "id": uid,
-                    "username": uname,
-                    "clearance": clearance
-                }
-                log_action(uname, "Logged in")
+                st.error("Invalid credentials")
+
+# ---------------- DASHBOARD ----------------
+def dashboard_page(user):
+    st.title(f"{user.username}'s Dashboard")
+    st.write(f"Role: {user.role} | Clearance Level: {user.clearance}")
+    st.sidebar.write(f"Logged in as {user.username}")
+    st.sidebar.button("Logout", on_click=lambda: st.session_state.update({"logged_in":False,"user":None}))
+    st.subheader("Accessible Patients")
+
+    search = st.text_input("Search patient by name")
+    patients = db_session.query(Patient).filter(Patient.classification <= user.clearance)
+    if search:
+        patients = [p for p in patients if search.lower() in p.name.lower()]
+
+    cols = st.columns(3)
+    for idx, p in enumerate(patients):
+        col = cols[idx % 3]
+        with col:
+            color = "#2ecc71" if p.classification==1 else "#f1c40f" if p.classification==2 else "#e63946"
+            with st.container():
+                st.markdown(f"<div style='background-color:#1f1f1f; padding:15px; border-left:5px solid {color}; border-radius:10px;'>", unsafe_allow_html=True)
+                st.markdown(f"### {p.name}")
+                st.markdown(f"Classification: {p.classification}")
+                st.markdown(f"Diagnosis: {'***Hidden***' if user.clearance < p.classification else p.diagnosis}")
+                st.markdown("</div>", unsafe_allow_html=True)
+                if st.button(f"View {p.name}", key=f"view_{p.id}"):
+                    if user.clearance >= p.classification:
+                        db_session.add(AuditLog(username=user.username, patient_name=p.name, action="GRANTED"))
+                        db_session.commit()
+                        st.success(f"Access Granted to {p.name}. Check your email for details.")
+                        st.info(f"Diagnosis: {p.diagnosis}")
+                    else:
+                        db_session.add(AuditLog(username=user.username, patient_name=p.name, action="DENIED"))
+                        db_session.commit()
+                        st.error("Access Denied: Insufficient clearance.")
+
+# ---------------- ADMIN PANEL ----------------
+def admin_panel(user):
+    st.title("Admin Panel")
+    st.sidebar.write(f"Admin: {user.username}")
+    st.sidebar.button("Logout", on_click=lambda: st.session_state.update({"logged_in":False,"user":None}))
+
+    # Users Section
+    st.subheader("Users")
+    users = db_session.query(User).all()
+    for u in users:
+        cols = st.columns([3,2,2,2])
+        cols[0].write(f"**{u.username}**")
+        cols[1].write(f"Role: {u.role}")
+        cols[2].write("🟢 Active" if u.is_active else "🔴 Disabled")
+
+        # Disable / Enable
+        if u.username != user.username:
+            if u.is_active:
+                if cols[3].button("Disable", key=f"disable_{u.id}"):
+                    u.is_active = 0
+                    db_session.commit()
+                    st.rerun()
+            else:
+                if cols[3].button("Enable", key=f"enable_{u.id}"):
+                    u.is_active = 1
+                    db_session.commit()
+                    st.rerun()
+
+        # Delete user
+        if u.username != user.username:
+            if st.button(f"❌ Delete {u.username}", key=f"delete_{u.id}"):
+                db_session.delete(u)
+                db_session.commit()
+                st.success(f"{u.username} deleted")
                 st.rerun()
 
-# ================= APP =================
+    # Add New User
+    with st.form("add_user_form"):
+        st.write("Add New User")
+        new_username = st.text_input("Username")
+        new_password = st.text_input("Password", type="password")
+        new_role = st.selectbox("Role", ["admin","doctor","nurse","staff"])
+        submitted = st.form_submit_button("Add User")
+        if submitted:
+            if db_session.query(User).filter_by(username=new_username).first():
+                st.error("Username already exists.")
+            else:
+                new_user = User(username=new_username, role=new_role, clearance=ROLE_CLEARANCE[new_role])
+                new_user.set_password(new_password)
+                db_session.add(new_user)
+                db_session.commit()
+                st.success(f"User {new_username} added successfully.")
+
+    # Patients Table
+    st.subheader("Patients")
+    patients = db_session.query(Patient).all()
+    patients_df = pd.DataFrame([{"Name": p.name, "Diagnosis": p.diagnosis, "Classification": p.classification} for p in patients])
+    st.dataframe(patients_df.style.set_properties(**{'background-color': '#1e1e2e', 'color': 'white'}))
+
+    # Add Patient Form
+    with st.form("add_patient_form"):
+        st.write("Add New Patient")
+        patient_name = st.text_input("Patient Name")
+        diagnosis = st.text_input("Diagnosis")
+        classification = st.slider("Classification Level", 1, 3, 1)
+        submitted = st.form_submit_button("Add Patient")
+        if submitted:
+            if db_session.query(Patient).filter_by(name=patient_name).first():
+                st.error("Patient already exists.")
+            else:
+                new_patient = Patient(name=patient_name, diagnosis=diagnosis, classification=classification)
+                db_session.add(new_patient)
+                db_session.commit()
+                st.success(f"Patient {patient_name} added successfully.")
+
+    # Audit Logs
+    st.subheader("Audit Logs")
+    logs = db_session.query(AuditLog).order_by(AuditLog.timestamp.desc()).all()
+    logs_df = pd.DataFrame([{"Time": l.timestamp, "User": l.username, "Patient": l.patient_name, "Action": l.action} for l in logs])
+    st.dataframe(logs_df.style.set_properties(**{'background-color': '#1e1e2e', 'color': 'white'}))
+
+# ---------------- MAIN ----------------
+if not st.session_state.logged_in:
+    login_page()
 else:
     user = st.session_state.user
+    if user.role == "admin":
+        admin_panel(user)
+    else:
+        dashboard_page(user)
 
-    st.sidebar.success(f"User: {user['username']}")
-    st.sidebar.write(f"Clearance: {user['clearance']}")
-
-    pages = ["Dashboard", "Logout"]
-    if user["clearance"] == "Top Secret":
-        pages.insert(1, "Admin Panel")
-        pages.insert(2, "Audit Logs")
-
-    page = st.sidebar.radio("Navigation", pages)
-
-    # -------- DASHBOARD --------
-    if page == "Dashboard":
-        st.header("🏥 Healthcare Dashboard")
-        st.info("Access enforced using Mandatory Access Control (MAC).")
-
-        if user["clearance"] in ["Top Secret", "Secret"]:
-            st.success("Access Granted: Medical Records")
-        elif user["clearance"] == "Confidential":
-            st.warning("Limited Access: Patient Info Only")
-        else:
-            st.error("Access Denied")
-
-    # -------- ADMIN PANEL --------
-    elif page == "Admin Panel":
-        st.header("🛡️ Admin Panel")
-
-        for uid, uname, clearance, active in get_users():
-            c1, c2, c3, c4 = st.columns([3, 3, 2, 4])
-
-            c1.write(f"**{uname}**")
-            c2.write(clearance)
-            c3.write("🟢 Active" if active else "🔴 Disabled")
-
-            if uname == "admin":
-                c4.write("🔒 Protected")
-                continue
-
-            if active:
-                if c4.button("🚫 Disable", key=f"d_{uid}"):
-                    disable_user(uid)
-                    log_action("admin", f"Disabled {uname}")
-                    st.rerun()
-            else:
-                if c4.button("✅ Enable", key=f"e_{uid}"):
-                    enable_user(uid)
-                    log_action("admin", f"Enabled {uname}")
-                    st.rerun()
-
-            if c4.button("🗑️ Delete", key=f"x_{uid}"):
-                st.session_state.confirm_delete = (uid, uname)
-
-        if st.session_state.confirm_delete:
-            uid, uname = st.session_state.confirm_delete
-            st.error(f"Confirm permanent deletion of **{uname}**?")
-            a, b = st.columns(2)
-
-            if a.button("Cancel"):
-                st.session_state.confirm_delete = None
-                st.rerun()
-
-            if b.button("Yes, Delete"):
-                delete_user(uid)
-                log_action("admin", f"Deleted {uname}")
-                st.session_state.confirm_delete = None
-                st.rerun()
-
-    # -------- AUDIT LOGS --------
-    elif page == "Audit Logs":
-        st.header("📜 Audit Logs")
-        for u, a, t in get_logs():
-            st.write(f"🕒 {t} | 👤 {u} | 🔐 {a}")
-
-    # -------- LOGOUT --------
-    elif page == "Logout":
-        log_action(user["username"], "Logged out")
-        st.session_state.user = None
-        st.rerun()
