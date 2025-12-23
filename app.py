@@ -18,6 +18,7 @@ class User(Base):
     password_hash = Column(String)
     role = Column(String)
     clearance = Column(Integer)
+    active = Column(Integer, default=1)  # 1 = active, 0 = disabled
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -82,7 +83,6 @@ if "user" not in st.session_state:
 # ---------------- LOGIN PAGE ----------------
 def login_page():
     st.set_page_config(page_title="MAC Healthcare System", page_icon="🔒", layout="centered")
-    
     st.markdown("<h1 style='text-align: center; color: #1f6feb;'>🔒 MAC Healthcare System</h1>", unsafe_allow_html=True)
     st.markdown("<h4 style='text-align: center; color: white;'>Secure Access Controlled Dashboard</h4>", unsafe_allow_html=True)
     st.write("")  # spacing
@@ -96,8 +96,11 @@ def login_page():
         if st.button("Login"):
             user = db_session.query(User).filter_by(username=username).first()
             if user and user.check_password(password):
-                st.session_state.logged_in = True
-                st.session_state.user = user
+                if user.active == 0:
+                    st.error("User is disabled. Contact admin.")
+                else:
+                    st.session_state.logged_in = True
+                    st.session_state.user = user
             else:
                 st.error("Invalid credentials")
 
@@ -145,9 +148,35 @@ def admin_panel(user):
     # Users Table
     st.subheader("Users")
     users = db_session.query(User).all()
-    users_df = pd.DataFrame([{"Username": u.username, "Role": u.role, "Clearance": u.clearance} for u in users])
+    users_data = []
+    for u in users:
+        status = "Active" if getattr(u, "active", 1) else "Disabled"
+        users_data.append({"Username": u.username, "Role": u.role, "Clearance": u.clearance, "Status": status})
+    users_df = pd.DataFrame(users_data)
     st.dataframe(users_df.style.set_properties(**{'background-color': '#1e1e2e', 'color': 'white'})\
                              .apply(lambda x: ['background-color: #2a2a3c' if i%2==0 else '' for i in range(len(x))], axis=1))
+
+    # Disable / Enable / Delete buttons
+    for u in users:
+        col1, col2, col3 = st.columns([1,1,1])
+        with col1:
+            if st.button(f"Disable {u.username}", key=f"disable_{u.id}"):
+                u.active = 0
+                db_session.commit()
+                st.success(f"{u.username} disabled.")
+        with col2:
+            if st.button(f"Enable {u.username}", key=f"enable_{u.id}"):
+                u.active = 1
+                db_session.commit()
+                st.success(f"{u.username} enabled.")
+        with col3:
+            if st.button(f"Delete {u.username}", key=f"delete_{u.id}"):
+                if u.username != "admin":
+                    db_session.delete(u)
+                    db_session.commit()
+                    st.success(f"{u.username} deleted.")
+                else:
+                    st.error("Cannot delete main admin.")
 
     # Add User Form
     with st.form("add_user_form"):
@@ -206,3 +235,4 @@ else:
         admin_panel(user)
     else:
         dashboard_page(user)
+
