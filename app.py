@@ -1,5 +1,5 @@
 import streamlit as st
-from sqlalchemy import create_engine, Column, Integer, String, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, inspect
 from sqlalchemy.orm import sessionmaker, declarative_base
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
@@ -41,7 +41,16 @@ class AuditLog(Base):
     action = Column(String)
     timestamp = Column(DateTime, default=datetime.now)
 
+# Create tables if missing
 Base.metadata.create_all(engine)
+
+# ---------------- SAFE SCHEMA UPDATE ----------------
+inspector = inspect(engine)
+columns = [col['name'] for col in inspector.get_columns('users')]
+if 'active' not in columns:
+    with engine.connect() as conn:
+        conn.execute("ALTER TABLE users ADD COLUMN active INTEGER DEFAULT 1")
+        conn.commit()
 
 # ---------------- INITIAL DATA ----------------
 def init_data():
@@ -65,7 +74,7 @@ def init_data():
 
 init_data()
 
-# ---------------- STREAMLIT CSS ----------------
+# ---------------- STREAMLIT CSS (embedded) ----------------
 st.markdown("""
 <style>
 body {background-color:#0b0c10; color:white; font-family:'Arial', sans-serif;}
@@ -85,19 +94,17 @@ def login_page():
     st.set_page_config(page_title="MAC Healthcare System", page_icon="🔒", layout="centered")
     st.markdown("<h1 style='text-align: center; color: #1f6feb;'>🔒 MAC Healthcare System</h1>", unsafe_allow_html=True)
     st.markdown("<h4 style='text-align: center; color: white;'>Secure Access Controlled Dashboard</h4>", unsafe_allow_html=True)
-    st.write("")  # spacing
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.markdown("<h5 style='color:white; text-align:center;'>Login</h5>", unsafe_allow_html=True)
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
-        st.write("")  # spacing
         if st.button("Login"):
             user = db_session.query(User).filter_by(username=username).first()
             if user and user.check_password(password):
                 if user.active == 0:
-                    st.error("User is disabled. Contact admin.")
+                    st.error("Account disabled. Contact admin.")
                 else:
                     st.session_state.logged_in = True
                     st.session_state.user = user
@@ -145,38 +152,35 @@ def admin_panel(user):
     st.sidebar.write(f"Admin: {user.username}")
     st.sidebar.button("Logout", on_click=lambda: st.session_state.update({"logged_in":False,"user":None}))
 
-    # Users Table
     st.subheader("Users")
     users = db_session.query(User).all()
-    users_data = []
-    for u in users:
-        status = "Active" if getattr(u, "active", 1) else "Disabled"
-        users_data.append({"Username": u.username, "Role": u.role, "Clearance": u.clearance, "Status": status})
-    users_df = pd.DataFrame(users_data)
-    st.dataframe(users_df.style.set_properties(**{'background-color': '#1e1e2e', 'color': 'white'})\
-                             .apply(lambda x: ['background-color: #2a2a3c' if i%2==0 else '' for i in range(len(x))], axis=1))
 
-    # Disable / Enable / Delete buttons
+    # Session flag for safe rerun
+    if "rerun_flag" not in st.session_state:
+        st.session_state.rerun_flag = False
+
     for u in users:
-        col1, col2, col3 = st.columns([1,1,1])
+        col1, col2, col3 = st.columns([4,2,2])
         with col1:
-            if st.button(f"Disable {u.username}", key=f"disable_{u.id}"):
-                u.active = 0
-                db_session.commit()
-                st.success(f"{u.username} disabled.")
+            status = "Active" if u.active else "Disabled"
+            st.markdown(f"{u.username} ({u.role}) - Clearance: {u.clearance} - Status: {status}")
         with col2:
-            if st.button(f"Enable {u.username}", key=f"enable_{u.id}"):
-                u.active = 1
+            if st.button(f"{'Disable' if u.active else 'Enable'} {u.username}", key=f"toggle_{u.id}"):
+                u.active = 0 if u.active else 1
                 db_session.commit()
-                st.success(f"{u.username} enabled.")
+                st.success(f"{u.username} has been {'disabled' if u.active == 0 else 'enabled'}.")
+                st.session_state.rerun_flag = True
         with col3:
             if st.button(f"Delete {u.username}", key=f"delete_{u.id}"):
-                if u.username != "admin":
-                    db_session.delete(u)
-                    db_session.commit()
-                    st.success(f"{u.username} deleted.")
-                else:
-                    st.error("Cannot delete main admin.")
+                db_session.delete(u)
+                db_session.commit()
+                st.success(f"{u.username} deleted permanently.")
+                st.session_state.rerun_flag = True
+
+    # Trigger rerun once after all changes
+    if st.session_state.rerun_flag:
+        st.session_state.rerun_flag = False
+        st.experimental_rerun()
 
     # Add User Form
     with st.form("add_user_form"):
@@ -196,36 +200,6 @@ def admin_panel(user):
                 db_session.commit()
                 st.success(f"User {new_username} added successfully.")
 
-    # Patients Table
-    st.subheader("Patients")
-    patients = db_session.query(Patient).all()
-    patients_df = pd.DataFrame([{"Name": p.name, "Diagnosis": p.diagnosis, "Classification": p.classification} for p in patients])
-    st.dataframe(patients_df.style.set_properties(**{'background-color': '#1e1e2e', 'color': 'white'})\
-                             .apply(lambda x: ['background-color: #2a2a3c' if i%2==0 else '' for i in range(len(x))], axis=1))
-
-    # Add Patient Form
-    with st.form("add_patient_form"):
-        st.write("Add New Patient")
-        patient_name = st.text_input("Patient Name")
-        diagnosis = st.text_input("Diagnosis")
-        classification = st.slider("Classification Level", 1, 3, 1)
-        submitted = st.form_submit_button("Add Patient")
-        if submitted:
-            if db_session.query(Patient).filter_by(name=patient_name).first():
-                st.error("Patient already exists.")
-            else:
-                new_patient = Patient(name=patient_name, diagnosis=diagnosis, classification=classification)
-                db_session.add(new_patient)
-                db_session.commit()
-                st.success(f"Patient {patient_name} added successfully.")
-
-    # Audit Logs
-    st.subheader("Audit Logs")
-    logs = db_session.query(AuditLog).order_by(AuditLog.timestamp.desc()).all()
-    logs_df = pd.DataFrame([{"Time": l.timestamp, "User": l.username, "Patient": l.patient_name, "Action": l.action} for l in logs])
-    st.dataframe(logs_df.style.set_properties(**{'background-color': '#1e1e2e', 'color': 'white'})\
-                           .apply(lambda x: ['background-color: #2a2a3c' if i%2==0 else '' for i in range(len(x))], axis=1))
-
 # ---------------- MAIN ----------------
 if not st.session_state.logged_in:
     login_page()
@@ -235,6 +209,3 @@ else:
         admin_panel(user)
     else:
         dashboard_page(user)
-
-
-
